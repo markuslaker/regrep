@@ -1,0 +1,1214 @@
+#!/usr/bin/perl
+
+package ReGrep::Options;
+use warnings;
+use strict;
+
+# How to treat binary files:
+sub BinFilesBinary()    {0}     # Default: print a one-line message if there's a match, or nothing otherwise.
+sub BinFilesNoMatch()   {1}     # Assume that a binary file never matches.
+sub BinFilesText()      {2}     # Treat a binary file as if it were a textfile.
+
+# How to treat directories:
+sub DirActionRead()     {0}     # Default: read directories as if they were normal files
+sub DirActionSkip()     {1}     # Silently ignore directories
+sub DirActionRecurse()  {2}     # Recurse into directories
+
+use fields
+    # Passed in by the caller:
+    'Binary',       # On Dos-ish platforms, read files in binary mode
+    'ByteOffset',   # Print the byte-offset of each line
+    'ContextAft',   # Lines of context printed after  a match
+    'ContextFore',  # Lines of context printed before a match
+    'Count',        # Print just a count of matches per file
+    'DevSkip',      # True if you want to ignore devices
+    'DirAction',    # One of the 'DirActionXxx' constants above
+    'DirExclude',   # Pattern of filenames to exclude when recursing through a directory
+    'DirInclude',   # Pattern of filenames to include when recursing through a directory
+    'ExtMatches',   # Show only the text on each line that your regex captures using capturing brackets ( ).
+    'FileMatch',    # print names of files with or without matches
+    'Filename',     # print the filename
+    'Highlight',    # Ansi control code to use for highlighting a match (undefined or empty if no highlighting is wanted)
+    'LineNo',       # print the line number
+    'Invert',       # Invert the match
+    'MaxCount',     # Maximum number of (non-)matches we'll find and report
+    'MMap',         # Do memory-mapped I/O
+    'NoMessages',   # Suppress messages about nonexistent or unreadable files and directories
+    'NullIn',       # Assume that input lines are separated by null bytes (\x00) instead of newlines.
+    'NullOut',      # After printing a filename, output a null byte (\x00) instead of a colon or a dash.
+    'OnBinFile',    # One of the 'BinFilesXxx' constants above
+    'OnlyMatching', # Print only the part of the line that matches the regex
+    'PerlBinary',   # Print the auto-generated Perl function that greps binary files
+    'PerlFile',     # Print the auto-generated Perl functions that do file-handling
+    'PerlText',     # Print the auto-generated Perl function that greps text files
+    'Quiet',        # Print no matches.  Exit successfully as soon as a match is found.
+    'RX',           # The regular expression we're searching for
+    'SemId',        # The ID of the semaphore that allows us to print
+    'SemLock',      # The semop string that acquires the semaphore that allows us to print
+    'SemUnlock',    # The semop string that releases the semaphore
+    'SkipMatchFile',# Skip files whose names match the regex: useful for finding external references to a class or file
+    'Sparse',       # Load small files into memory and pre-check them before breaking them into lines
+    'Threaded',     # True if we're running multithreaded, and we must acquire a semaphore before printing.
+    'UnixOffset',   # On Windows, print byte offsets as if this were a Unix file (i.e. with the CRs stripped out)
+
+    # Maintained by ReGrep:
+    'BinGrepper',   # A reference to a hand-compiled function that greps binary files with the options the user has chosen
+    'CurFileNo',    # Number of files processed with this Options object
+    'FhGrepper',    # A reference to a hand-compiled function that determines whether a filehandle is text or binary and calls the right grepper
+    'FileGrepper',  # A reference to a hand-compiled function that skips pipes, devices, etc, recurses into directories, and greps plain files
+    'PlainGrepper', # A reference to a hand-compiled function that opens a file and then calls FhGrepper
+    'PrintFileNo',  # The last file number from which we printed a line
+    'PrintLineNo',  # The number of the last line we printed
+    'Recurser',     # A reference to a hand-compiled function that goes into directories and greps each file in turn
+    'TextGrepper';  # A reference to a hand-compiled function that greps text files with the options the user has chosen
+
+sub new() {
+    return fields::new __PACKAGE__;
+}
+
+
+package ReGrep;
+use warnings;
+use strict;
+
+sub AnsiCancelHighlight() {"\x1B[0m"}
+
+
+# Compilation and execution proceed in the following stages:
+#
+# 1. Perl compiles and runs your program in the usual way.
+# 2. At some point, your program gathers options and calls &ReGrep::compile.
+# 3. &compile takes a copy of $sub_filehandle_grep_text and preprocesses it by
+#    removing code that implements features the user didn't ask for.
+# 4. &compile eval()s the proprocessed text.  The result is a reference to an
+#    anonymous sub that greps a text file in the way the user wants.  The
+#    reference is stored in $$options{TextGrepper}.
+# 5. Steps 3 and 4 are repeated for $sub_filehandle_grep_binary and the
+#    customisable file-handling subs.
+# 6. At some later point, your program calls $$options{FileGrepper} () or
+#    $$options{FhGrepper} ().  These functions end up calling the other
+#    anonymous subs compiled earlier.
+#
+# Why do we make life so complicated?  By paring the grepper function down to
+# the bone, we make it run as fast as possible.  Rather than continually
+# testing whether a feature is wanted and skipping over it if it isn't, we
+# avoid the cost of the test by not compiling unwanted features into the code.
+#
+# We use three kinds of preprocessing:
+#
+# A. Conditional compilation (#if, #elsif, #else, #endif); the expressions in
+#    these lines are evaluated in step 3.
+# B. Symbolic constants (#define), whose values are substituted into the code
+#    when they appear later in the text.
+# C. Substitution of compile-time constants.  The expression
+#    const«$$options{ContextFore}» evaluates $$options{ContextFore} during
+#    step 3 and writes its value as a literal number into the code.
+#
+# The preprocessing mechanism is deliberately reminiscent of the C
+# preprocessor as a visual reminder that preprocessing directives are run
+# before the rest of the code is compiled, let alone run.
+#
+# If you can think of ways to make this code even less maintainable, I'd be
+# interested in hearing them.
+
+
+##########################################################################
+#
+# Text-file grepper
+
+my $sub_filehandle_grep_text = <<'SUB';
+    sub {
+        (my $fhout, my $fhin, my $filename, my ReGrep::Options $options) = @_;
+
+        my $nrmatches = 0;
+        my $rx = $$options{RX};
+
+#define INVERT const«$$options{Invert}? 'not': ''»
+
+#if defined $$options{Sparse}
+        my $sparse_found;
+        if (-f $fhin and -s _ <= const«$$options{Sparse}») {
+            read $fhin, my $buf, const«$$options{Sparse}»;
+            $sparse_found = INVERT $buf =~ $rx;
+
+ #if $$options{Quiet}
+            exit 0 if $sparse_found;
+ #endif
+
+ #if $$options{FileMatch}
+            $nrmatches = $sparse_found;
+  #define IF_SPARSE_ALLOWS unless (defined $sparse_found) {
+ #else
+            seek $fhin, 0, 0;
+  #define IF_SPARSE_ALLOWS if ($sparse_found or not defined $sparse_found) {
+ #endif
+}
+#else
+ #define IF_SPARSE_ALLOWS
+#endif
+
+
+#if $$options{ContextFore} or $$options{ContextAft}
+        my $curfileno       = $$options{CurFileNo} || 0;
+        my $printfileno     = $$options{PrintFileNo};
+        my $printlineno     = $$options{PrintLineNo};
+#endif
+
+#if $$options{NullOut}
+ #define POST_FN_MATCH "\x00"
+ #define POST_FN_CTX   "\x00"
+ #define POST_FN_CNT   "\x00"
+ #define POST_FN_FOUND "\x00"
+#else
+ #define POST_FN_MATCH ":"
+ #define POST_FN_CTX   "-"
+ #define POST_FN_CNT   ":"
+ #define POST_FN_FOUND "\n"
+#endif
+
+#if $$options{ContextFore}
+        my @forecontext;
+ #if $$options{ByteOffset}
+        my @foreoffs;
+ #endif
+        my $hist_consume = 0;
+        my $hist_length = 0;
+#endif
+
+#if $$options{ContextAft}
+        my $aftershadow = 0;
+#endif
+
+#if $$options{ByteOffset}
+        my $lineoffs = 0;
+#endif
+
+#if $$options{NullIn}
+ #define LINETERM    "\x00"
+ #define RX_LINETERM \x00
+#else
+ #define LINETERM    "\n"
+ #define RX_LINETERM \n
+#endif
+
+#if defined $$options{MaxCount}
+        my $maxcount = const«$$options{MaxCount}»;
+        my $seekback;
+#endif
+
+#if $$options{Binary}
+        binmode $fhin;
+#endif
+
+#if $$options{Highlight}
+        my $opt_highlight = $$options{Highlight};
+#endif
+
+#if $$options{Threaded} and not ($$options{Count} or $$options{FileMatch})
+        my $got_print_mtx;
+#endif
+
+        local $_;
+        IF_SPARSE_ALLOWS
+            while (<$fhin>) {
+
+#if defined $$options{MaxCount}
+ #define CHECK_SHADOW const«$$options{ContextAft}? 'or $aftershadow': ''»
+                last unless $maxcount CHECK_SHADOW;
+#endif
+
+#define CHECK_COUNT const«defined $$options{MaxCount}? 'and $maxcount': ''»
+                if (INVERT /$rx/ CHECK_COUNT) {
+#if $$options{Quiet}
+                    exit 0;
+#endif
+
+                    ++$nrmatches;
+
+#if defined $$options{MaxCount}
+                    --$maxcount   or $seekback = tell $fhin;
+#endif
+
+#if not($$options{Count} or defined $$options{FileMatch})
+ #if $$options{Threaded}
+                    unless ($got_print_mtx) {
+                        semop $$options{SemId}, $$options{SemLock}
+                            or die "Can't acquire SysV mutex: $!\n";
+                        $got_print_mtx = 1;
+                    }
+ #endif
+
+ #if $$options{ContextFore} or $$options{ContextAft}
+  #define CHECK_HISTORY_OR const«$$options{ContextFore}? '$. - $hist_length != $printlineno+1 or': ''»
+                    # Print dashes if we're printing context and there's been a
+                    # gap in our output:
+                    print $fhout "--\n" if defined $printlineno and (CHECK_HISTORY_OR $curfileno != $printfileno);
+ #endif
+
+ #if $$options{ContextFore}
+                    # Print the 'before' context:
+                    while ($hist_length) {
+  #if $$options{Filename}
+                        print $fhout $filename, POST_FN_CTX;
+  #endif
+  #if $$options{LineNo}
+                        print $fhout $. - $hist_length, '-';
+  #endif
+  #if $$options{ByteOffset}
+                        print $fhout $foreoffs[$hist_consume], '-';
+  #endif
+                        print $fhout $forecontext[$hist_consume];
+                        --$hist_length;
+                        $hist_consume = ($hist_consume+1) % const«$$options{ContextFore}»;
+                    }
+ #endif
+
+                    # Print the matching line:
+ #if $$options{Filename}
+                    print $fhout $filename, POST_FN_MATCH;
+ #endif
+ #if $$options{LineNo}
+                    print $fhout $., ':';
+ #endif
+ #if $$options{ByteOffset}
+                    print $fhout $lineoffs, ':';
+ #endif
+
+ #if $$options{Highlight}
+                    chomp (my $text = $_);
+                    print $fhout $1, $opt_highlight, $2, AnsiCancelHighlight   while $text =~ /\G(.*?)($rx)/gc;
+                    print $fhout substr($text, pos $text), "\n";
+ #elsif $$options{ExtMatches}
+                    chomp (my $text = $_);
+                    print $fhout $text =~ /$rx/g, "\n";
+ #elsif $$options{OnlyMatching}
+                    chomp (my $text = $_);
+                    print $fhout $1, "\n"   while $text =~ /\G.*?($rx)/g;
+ #else
+                    print $fhout $_;
+                    print $fhout LINETERM unless /RX_LINETERM/;
+ #endif
+
+ #if $$options{ContextAft}
+                    $aftershadow = const«$$options{ContextAft}»;
+ #endif
+
+ #if $$options{ContextFore} or $$options{ContextAft}
+                    $printfileno = $curfileno;
+                    $printlineno = $.;
+ #endif
+#endif
+                }
+
+#if $$options{ContextFore} or $$options{ContextAft}
+                else {
+#endif
+
+#if $$options{ContextAft}
+                    # If the line doesn't match, print any 'after' context.
+                    if ($aftershadow) {
+                        --$aftershadow;
+ #if $$options{Filename}
+                        print $fhout $filename, POST_FN_CTX;
+ #endif
+ #if $$options{LineNo}
+                        print $fhout $., '-';
+ #endif
+ #if $$options{ByteOffset}
+                        print $fhout $lineoffs, '-';
+ #endif
+                        print $fhout $_;
+                        print $fhout LINETERM unless /RX_LINETERM/;
+                        $printlineno = $.;
+                    }
+#endif
+
+#if $$options{ContextFore}
+ #define CONJUNCTION const«$$options{ContextAft}? 'elsif': 'if'»
+                    # If the line isn't printed, save it as possible 'before' context
+                    # for the next match:
+                    CONJUNCTION ($hist_length == const«$$options{ContextFore}») {
+                        $forecontext[$hist_consume] = $_;
+ #if $$options{ByteOffset}
+                        $foreoffs[$hist_consume] = $lineoffs;
+ #endif
+                        $hist_consume = ($hist_consume+1) % const«$$options{ContextFore}»;
+                    }
+                    else {
+                        my $savepos = ($hist_consume + $hist_length) % const«$$options{ContextFore}»;
+                        $forecontext[$savepos] = $_;
+ #if $$options{ByteOffset}
+                        $foreoffs[$savepos] = $lineoffs;
+ #endif
+                        ++$hist_length;
+                    }
+#endif
+
+#if $$options{ContextFore} or $$options{ContextAft}
+                }
+#endif
+
+#if $$options{ByteOffset}
+ #if $$options{UnixOffset}
+                $lineoffs += length;
+ #else
+                $lineoffs = tell $fhin;
+ #endif
+#endif
+            }
+
+#if defined $$options{Sparse}
+        }
+#endif
+
+#if defined $$options{FileMatch}
+        if (($nrmatches != 0) == const«$$options{FileMatch}») {
+ #if $$options{Threaded}
+            semop $$options{SemId}, $$options{SemLock}
+                or die "Can't acquire SysV mutex: $!\n";
+ #endif
+            print $fhout $filename, POST_FN_FOUND;
+ #if $$options{Threaded}
+            semop $$options{SemId}, $$options{SemUnlock}
+                or die "Can't release SysV mutex: $!\n";
+ #endif
+        }
+#endif
+
+#if $$options{Count}
+ #if $$options{Threaded}
+        semop $$options{SemId}, $$options{SemLock}
+            or die "Can't acquire SysV mutex: $!\n";
+ #endif
+
+ #if $$options{Filename}
+        print $fhout $filename, POST_FN_CNT;
+ #endif
+
+        print $nrmatches, "\n";
+
+ #if $$options{Threaded}
+        semop $$options{SemId}, $$options{SemUnlock}
+            or die "Can't release SysV mutex: $!\n";
+ #endif
+#endif
+
+#if $$options{Threaded} and not ($$options{Count} or $$options{FileMatch})
+        semop $$options{SemId}, $$options{SemUnlock}
+            or die "Can't release SysV mutex: $!\n"
+                if $got_print_mtx;
+#endif
+
+#if $$options{ContextFore} or $$options{ContextAft}
+        # Keep enough state to know whether we must print a separarator line
+        # before the next block of output:
+        $$options{CurFileNo}    = $curfileno + 1;
+        $$options{PrintFileNo}  = $printfileno;
+        $$options{PrintLineNo}  = $printlineno;
+#endif
+
+#if defined $$options{MaxCount}
+        seek $fhin, $seekback, 0   if defined $seekback;
+#endif
+
+        return $nrmatches;
+    }
+SUB
+
+##########################################################################
+#
+# Binary-file grepper
+
+my $sub_filehandle_grep_binary = <<'SUB';
+    sub {
+        (my $fhout, my $fhin, my $filename) = @_;
+        my $nrmatches = 0;
+        my $rx = $$options{RX};
+
+#if defined $$options{MaxCount}
+        my $maxcount  = const«$$options{MaxCount}»;
+#endif
+
+        while (<$fhin>) {
+
+#if defined $$options{MaxCount}
+            last unless $maxcount;
+#endif
+            if (
+#if $$options{Invert}
+                not
+#endif
+                    /$rx/) {
+
+#if $$options{Quiet}
+                exit 0;
+#endif
+
+#if not ($$options{Count} or defined $$options{FileMatch})
+                print $fhout "Binary file ";
+                print $fhout $filename, ' '   if defined $filename;
+                print $fhout "matches\n";
+                return 1;
+#endif
+
+                ++$nrmatches;
+
+#if defined $$options{MaxCount} 
+                --$maxcount;
+#endif
+
+            }
+        }
+
+#if $$options{NullOut}
+ #define POST_FN_MATCH "\x00"
+ #define POST_FN_COUNT "\x00"
+#else
+ #define POST_FN_MATCH "\n"
+ #define POST_FN_COUNT ":"
+#endif
+
+#if $$options{FileMatch}
+        print $fhout $filename, POST_FN_MATCH   if ($nrmatches != 0) == const«$$options{FileMatch}»;
+#elsif $$options{Count}
+        print $fhout $filename, POST_FN_COUNT, $nrmatches, "\n";
+#endif
+
+        return $nrmatches;
+    }
+SUB
+
+
+##########################################################################
+#
+# Grepper for any filehandle: works out whether we have a textfile or a
+# binary file, and calls the appropriate grepper (if any):
+
+my $sub_filehandle_grep = <<'SUB';
+    sub {
+        (my $fhout, my $fhin, my $filename, my ReGrep::Options $options) = @_;
+        local $/ = const«$$options{NullIn}? q/"\x00"/: q/"\n"/»;
+#if $$options{OnBinFile} == ReGrep::Options::BinFilesText or $$options{NullIn}
+        return $$options{TextGrepper} ($fhout, $fhin, $filename, $options);
+#else
+        return -T $fhin?
+                    $$options{TextGrepper} ($fhout, $fhin, $filename, $options):
+ #if $$options{OnBinFile} == ReGrep::Options::BinFilesBinary
+                    $$options{BinGrepper} ($fhout, $fhin, $filename, $options);
+ #else
+                    0;
+ #endif
+#endif
+    }
+SUB
+
+
+##########################################################################
+#
+# Grepper for any plain file (as opposed to a directory): opens the file
+# and, on success, passes it to the filehandle grepper.
+
+my $sub_plain_file_grep = <<'SUB';
+    sub {
+        (my $fhout, my $filename, my ReGrep::Options $options) = @_;
+        if (open my $fhin, "const«$$options{MMap}? '<:mmap': '<'»", $filename) {
+            # print join(" :: ", PerlIO::get_layers $fhin), "\n";
+            # exit;
+            return $$options{FhGrepper} ($fhout, $fhin, $filename, $options);
+        }
+        else {
+#if not $$options{NoMessages}
+            print STDERR "$filename: $!\n";
+#endif
+            return 0;
+        }
+    }
+SUB
+
+
+##########################################################################
+#
+# Given a directory name, greps all the files in the directory.
+
+my $sub_recurse_into_dir = <<'SUB';
+    sub {
+        (my $fhout, my $dirname, my ReGrep::Options $options) = @_;
+
+        if (opendir my $dh, $dirname) {
+            $dirname .= '/' unless $dirname =~ m|[/\\]$|;
+            my $nrmatches = 0;
+
+            while (defined(my $basename = readdir $dh)) {
+                next if $basename =~ /^\.\.?$/;
+#if defined $$options{DirExclude} or $$options{DirInclude}
+                my $fullname = $dirname . $basename;
+                next if (
+ #if defined $$options{DirInclude}
+                         $basename !~ /const«$$options{DirInclude}»/
+  #if defined $$options{DirExclude}
+                                                                     or
+  #endif
+ #endif
+ #if defined $$options{DirExclude}
+                                                                        $basename =~ /const«$$options{DirExclude}»/
+ #endif
+                                                                                                                   )
+                         and not -d $fullname;
+                $nrmatches += $$options{FileGrepper} ($fhout, $fullname, $options);
+#else
+                $nrmatches += $$options{FileGrepper} ($fhout, $dirname . $basename, $options);
+#endif
+            }
+            return $nrmatches;
+        }
+        else {
+#if not $$options{NoMessages}
+            print STDERR "$dirname: $!\n";
+#endif
+            return 0;
+        }
+    }
+SUB
+
+
+##########################################################################
+# Given a filename, this sub works out whether it refers to a plain file,
+# a directory or a special file (pipe, device, etc), and calls the
+# appropriate subfunction.
+
+my $sub_file_grep = <<'SUB';
+    sub {
+        (my $fhout, my $filename, my ReGrep::Options $options) = @_;
+
+#if $$options{SkipMatchFile}
+        return 0 if $filename =~ m| ([^/\\]+) $ |x  and  $1 =~ $$options{RX};
+#endif
+
+    # Resolve symlinks so that we can detect directories:
+    my $lname = $filename;
+    lstat $lname;
+    while (-l _) {
+        my $linkval = readlink $lname   or return 0;
+        $lname =~ s| [^\\/]* $ |$linkval|x;
+        0 while $lname =~ s# [\\/] [^\\/]+ [\\/] \.\. (?: [\\/] | $ ) #/#x;
+        lstat $lname;
+    }
+
+#if $$options{DevSkip}
+        return 0 if -p _ or -S _ or -b _ or -c _;
+#endif
+
+#if $$options{DirAction} == ReGrep::Options::DirActionSkip
+        return 0 if -d _;
+#endif
+
+#if $$options{DirAction} == ReGrep::Options::DirActionRecurse
+        return $$options{Recurser} ($fhout, $filename, $options)
+            if -d _;
+#endif
+
+        return $$options{PlainGrepper} ($fhout, $filename, $options);
+    }
+SUB
+
+
+##########################################################################
+
+
+# Here are the preprocessor and compiler for the functions above.
+
+# The #if/#elsif/#else/#endif processor doesn't recurse.  It uses an array
+# of states, called @stack, and emits text when all the states are On.
+
+sub Off()   {0}     # This #if...#endif hasn't yet had a true branch.
+sub On()    {1}     # We're in a true branch.  Emit code.
+sub Done()  {2}     # We've had a true branch.  This and all following branches are false.
+
+sub eval_or_die($$) {
+    (my $text, my ReGrep::Options $options) = @_;
+    my $code = eval $text;
+    die "Can't eval {$text}:\n$@\n" if $@;
+    return $code;
+}
+
+sub combine_states_for_elsif($$$) {
+    (my $state, my $condition, my ReGrep::Options $options) = @_;
+
+    return Done unless $state == Off;
+    return eval_or_die($condition, $options)? On: Off;
+}
+
+sub all_states_are_on(\@) {
+    my ($rstack) = @_;
+    return not grep {$_ != On} @$rstack;
+}
+
+# Tie together the #if...#endif system by answering the question:
+# does this line belong in the output or not?
+
+sub should_emit(\@$$) {
+    (my $rstack, my $line, my ReGrep::Options $options) = @_;
+
+    if (my ($cond) = $line =~ /^\s*#if\s+(.*)/) {
+        push @$rstack, eval_or_die($cond, $options)? On: Off;
+        return 0;
+    }
+
+    if (my ($cond) = $line =~ /^\s*#elsif\s+(.*)/) {
+        $$rstack[-1] = combine_states_for_elsif $$rstack[-1], $cond, $options;
+        return 0;
+    }
+
+    if ($line =~ /^\s*#else\b/) {
+        $$rstack[-1] = $$rstack[-1] == Off? On: Done;
+        return 0;
+    }
+
+    if ($line =~ /^\s*#endif\b/) {
+        pop @$rstack;
+        return 0;
+    }
+
+    return all_states_are_on @$rstack;
+}
+
+
+# Break the input code into lines.  Discard anything that should be #if-ed out,
+# implement define-constants, and do const«»-substitution.
+# This completes step 3.
+
+sub preprocess($$) {
+    (my $text, my ReGrep::Options $options) = @_;
+    my (%defs, $rx_defs);
+    my @stack;
+    my @result;
+
+    for my $line (split /\n/, $text) {
+        #Skip lines that are #if-ed out:
+        next unless should_emit @stack, $line, $options;
+
+        # Substitute constants for const«anything»:
+        0 while $line =~ s/ \b const « (.*?) » / eval_or_die $1, $options /ex;
+
+        # Catch #defines:
+        if ($line =~ / ^ \s* \#define \s+ (\w+) \s* (.*) /x) {
+            $defs{$1} = $2;
+            $rx_defs = join '|', keys %defs;
+            $rx_defs = qr/\b(?:$rx_defs)\b/;
+            next;
+        }
+
+        # Substitute #defined text:
+        if (defined $rx_defs) { 
+            0 while $line =~ s/($rx_defs)/$defs{$1}/;
+        }
+
+        # And emit the result:
+        push @result, $line   if $line =~ /\S/;
+    }
+
+    return join "\n", @result, '';
+}
+
+
+# Compile the resulting code into a set of anonymous subs, and store references
+# to them in %$options.  This is steps 4 and 5.
+
+sub compile($$) {
+    (my $fhout, my ReGrep::Options $options) = @_;
+
+    $$options{OnBinFile} ||= ReGrep::Options::BinFilesBinary;
+    $$options{DirAction} ||= ReGrep::Options::DirActionRead;
+
+    my $text = preprocess $sub_filehandle_grep_text, $options;
+    print $fhout "\n", $text, "\n"   if $$options{PerlText};
+    $$options{TextGrepper}  = eval_or_die $text, $options;
+
+    $text = preprocess $sub_filehandle_grep, $options;
+    print $fhout "\n", $text, "\n"   if $$options{PerlFile};
+    $$options{FhGrepper}    = eval_or_die $text, $options;
+
+    $text = preprocess $sub_plain_file_grep, $options;
+    print $fhout "\n", $text, "\n"   if $$options{PerlFile};
+    $$options{PlainGrepper} = eval_or_die $text, $options;
+
+    $text = preprocess $sub_file_grep, $options;
+    print $fhout "\n", $text, "\n"   if $$options{PerlFile};
+    $$options{FileGrepper}  = eval_or_die $text, $options;
+
+    if ($$options{DirAction} == ReGrep::Options::DirActionRecurse) {
+        $text = preprocess $sub_recurse_into_dir, $options;
+        print $fhout "\n", $text, "\n"   if $$options{PerlFile};
+        $$options{Recurser} = eval_or_die $text, $options;
+    }
+
+    if ($$options{OnBinFile} == ReGrep::Options::BinFilesBinary) {
+        $text = preprocess $sub_filehandle_grep_binary, $options;
+        print $fhout "\n", $text, "\n"   if $$options{PerlBinary};
+        $$options{BinGrepper} = eval_or_die $text, $options;
+    }
+}
+
+package main;
+use warnings;
+use strict;
+
+use IPC::SysV qw/IPC_PRIVATE S_IRWXU IPC_CREAT IPC_RMID GETVAL/;
+use Socket;
+
+our $VERSION = 0.01;
+
+# Won't start more --jobs than this:
+sub MaxNrJobs()     {12}
+
+# Used to keep each file's output together when we run multiple threads:
+my $semaphore;
+
+END {
+    if ($semaphore) {
+        semctl $semaphore, 0, IPC_RMID, 0
+            or print "semop failed: $!\n";
+    }
+}
+
+# ... even if exit is violent:
+$SIG{INT} = sub {exit 2};
+
+sub print_help_and_die() {
+    die <<'HELP';
+regrep [options] <Perl5-regex> [<file...>]
+
+Options are:
+    -A, --after-context <line-count>
+    -a, --text
+    -B, --before-context <line-count>
+    -b, --byte-offset
+    -C, --context <line-count>
+    -c, --count
+    -D, --devices {read,skip}
+    -d, --directories {read,skip,recurse}
+    -e, --regexp <Perl5-regex>
+    -F, --fixed-strings <strings-separated-by-newlines>
+    -f, --file <filename>
+    -H, --with-filename
+    -h, --no-filename
+    -I
+    -i, --ignore-case
+    -L, --files-without-match
+    -l, --files-with-match
+    -m, --max-count <maximum-number-of-matches>
+    -n, --line-number
+    -o, --only-matching
+    -q, --quiet, --silent
+    -r, -R, --recursive
+    -s, --no-messages
+    -U, --binary
+    -u, --unix-byte-offsets
+    -v, --invert-match
+    -w, --word-regexp
+    -x, --line-regexp
+    -Z, --null
+    -z, --null-data
+    --binary-files
+    --colour, --color[={auto,never,always}]
+    --exclude <Perl5-regex>
+    --include <Perl5-regex>
+    --label
+    --mmap
+        Same as in Gnu grep(1), except that regrep uses Perl 5 regular
+        expressions where Gnu grep(1) uses simpler regular expressions or
+        bash-style filename globs
+
+    -M, --exclude-matching
+        Exclude files whose basenames match the regex -- useful for finding
+        external references to classes or files.
+
+    -p, --pipe-filenames
+        Treat stdin as a newline-separated list of files to be grepped.
+
+        -j, --jobs <number-of-theads>
+            Grep multiple piped files in parallel.
+
+    -X, --extend-regexp
+        Compile the Perl regex with //x
+
+    -y, --extract-captures
+        Print only the parts of each line that your regex captures using
+        brackets ( ).
+
+    -S, --sparse <maximum-size-in-bytes>
+        Preload and pre-scan small files; only those that match are given a
+        full grep.  Saves time when most files aren't expected to match.
+HELP
+}
+
+sub default_to($$) {
+    $_[0] = $_[1] unless defined $_[0];
+}
+
+
+my ($opt_caseblind, $opt_extrx, $opt_wordrx, $opt_linerx, $opt_rx,
+    $opt_filename, $opt_label, $opt_pipefilenames, $opt_nullin, $opt_jobs);
+
+sub decode_highlight($) {
+    my ($text) = @_;
+    $text = 'never'   unless defined $text and $text ne '';
+    my $ansi_colour = defined $ENV{GREP_COLOR}? "\x1B[$ENV{GREP_COLOR}m": "\x1B[36m";   # cyan
+    return ''                           if $text eq 'never';
+    return $ansi_colour                 if $text eq 'always';
+    return -t STDOUT? $ansi_colour: ''  if $text eq 'auto';
+    die "'--colour' must be followed by 'never', 'always' or 'auto'\n";
+}
+
+sub decode_on_bin_file($) {
+    my ($text) = @_;
+    default_to $text, 'binary';
+    return $text eq 'binary'?           ReGrep::Options::BinFilesBinary:
+           $text eq 'without-match'?    ReGrep::Options::BinFilesNoMatch:
+           $text eq 'text'?             ReGrep::Options::BinFilesText:
+           die "'--binary-files' must be followed by 'binary', 'without-match' or 'text'\n";
+}
+
+sub decode_dev_skip($) {
+    my ($text) = @_;
+    default_to $text, 'read';
+    return $text eq 'read'? 0:
+           $text eq 'skip'? 1:
+           die "--devices must be followed by 'read' or 'skip'\n";
+}
+
+sub decode_dir_action($) {
+    my ($text) = @_;
+    default_to $text, 'read';
+    return $text eq 'read'?     ReGrep::Options::DirActionRead:
+           $text eq 'skip'?     ReGrep::Options::DirActionSkip:
+           $text eq 'recurse'?  ReGrep::Options::DirActionRecurse:
+           die "--directories must be followed by 'read', 'skip' or 'recurse'\n";
+}
+
+
+# GNU grep has a --colour switch.  It has an optional argument, which must be
+# separated from the switch name by '=', not space.  Getopt::Long doesn't
+# support this syntax, so hack it in by hand.
+
+sub get_colour_switch() {
+    my @colours = grep {/ ^ --colou?r \b =? /x} @ARGV   or return 'never';
+    @ARGV = grep {not / ^ --colou?r \b /x} @ARGV;
+    return $colours[0] =~ /=(.*)/? $1: 'auto';
+}
+
+
+# Compile a regular expression provided by the user.
+
+sub compile_rx($) {
+    my ($rx) = @_;
+    return defined $rx?
+        eval {qr/$rx/m} || die "Invalid regular expression, $rx:\n$@\n":
+        undef;
+}
+
+
+# Parse a --fixed-strings argument: a set of multiple regexen, separated by
+# newlines.  Return a string representation of a single regex that matches
+# any of the strings.
+
+sub read_fixed_strings($) {
+    my ($arg) = @_;
+    print "Arg: $arg\n";
+    my @rxen = map {"(?:\Q$_\E)"} split /\n/, $arg;
+    return join '|', @rxen;
+}
+
+
+# Read a set of patterns from a file.  Build a single regex that matches any
+# of the patterns.
+
+sub read_rx_file($) {
+    my ($filename) = @_;
+    open my $fh, '<', $filename   or die "$filename: $!\n";
+    my @rxen = <$fh>;
+    chomp @rxen;
+
+    # The grep(1) man page says that an empty regex file matches no files.
+    # But, in Perl, an empty regex matches all possible strings.
+    # So insert an unmatchable regex if the file is empty:
+    @rxen = '^$x' unless @rxen;
+
+    return join '|', map {"(?:$_)"} @rxen;
+}
+
+
+sub read_switches() {
+    my ReGrep::Options $options = ReGrep::Options::new;
+    my $opt_colour = get_colour_switch;
+    $$options{Highlight} = decode_highlight $opt_colour;
+    $$options{DirAction} = ReGrep::Options::DirActionRead;
+
+    if (grep {/^-/} @ARGV) {
+        eval 'use Getopt::Long qw/ :config gnu_getopt auto_version /';
+        die "Can't load Getopt::Long: $@\n" if $@;
+        my ($opt_binfiles, $opt_file_match, $opt_directories);
+        Getopt::Long::GetOptions(
+            # Options sent to ReGrep:
+            'after-context|A=i'     => \ my $opt_linesaft,
+            'text|a'                => sub {$opt_binfiles = 'text'},
+            'before-context|B=i'    => \ my $opt_linesfore,
+            'byte-offset|b'         => \ my $opt_byteoffset,
+            'context|C=i'           => \ my $opt_linesaround,
+            'count|c'               => \ my $opt_count,
+            'devices|D=s'           => \ my $opt_devices,
+            'directories|d=s'       => \    $opt_directories,
+            'I'                     => sub {$opt_binfiles = 'without-match'},
+            'files-without-match|L' => sub {$opt_file_match = 0},
+            'files-with-matches|l'  => sub {$opt_file_match = 1},
+            'max-count|m=i'         => \ my $opt_maxcount,
+            'exclude-matching|M'    => \ my $opt_skipmatchfile,
+            'line-number|n'         => \ my $opt_lineno,
+            'only-matching|o'       => \ my $opt_onlymatching,
+            'quiet|silent|q'        => \ my $opt_quiet,
+            'recursive|r|R'         => sub {$opt_directories = 'recurse'},
+            'no-messages|s'         => \ my $opt_nomessages,
+            'binary|U'              => \ my $opt_binary,
+            'unix-byte-offsets|u'   => \ my $opt_unixoffs,
+            'invert|v'              => \ my $opt_invert,
+            'extract-matches|y'     => \ my $opt_extmatches,
+            'null|Z'                => \ my $opt_nullout,
+            'null-data|z'           => \    $opt_nullin,
+            'binary-files=s'        => \    $opt_binfiles,
+            'exclude=s'             => \ my $opt_exclude,
+            'include=s'             => \ my $opt_include,
+            'mmap'                  => \ my $opt_mmap,
+            'sparse|S=i'            => \ my $opt_sparse,
+
+            # Options processed locally:
+            'regexp|e=s'            => \ $opt_rx,
+            'fixed-strings|F=s'     => sub {$opt_rx = read_fixed_strings $_[1]},
+            'file|f=s'              => sub {$opt_rx = read_rx_file $_[1]},
+            'with-filename|H'       => sub {$opt_filename = 1},
+            'no-filename|h'         => sub {$opt_filename = 0},
+            'jobs|j=i'              => \ $opt_jobs,
+            'ignore-case|i'         => \ $opt_caseblind,
+            'pipe-filenames|p'      => \ $opt_pipefilenames,
+            'word-regexp|w'         => \ $opt_wordrx,
+            'extend-regexp|X'       => \ $opt_extrx,
+            'line-regexp|x'         => \ $opt_linerx,
+            'help'                  => \ &print_help_and_die,
+            'label=s'               => \ $opt_label,
+
+            # Undocumented options:
+            '--perl-binary'         => \ my $opt_perlbinary,
+            '--perl-file'           => \ my $opt_perlfile,
+            '--perl-text'           => \ my $opt_perltext,
+        )
+            or print_help_and_die;
+
+        undef $opt_count if defined $opt_file_match;
+        default_to $opt_linesaft,  $opt_linesaround;
+        default_to $opt_linesfore, $opt_linesaround;
+        $opt_jobs = 1  if ($opt_jobs || 0) < 1;
+        $opt_jobs = MaxNrJobs if  $opt_jobs > MaxNrJobs;
+
+        $$options{Binary}       = $opt_binary;
+        $$options{ByteOffset}   = $opt_byteoffset;
+        $$options{ContextAft}   = $opt_linesaft;
+        $$options{ContextFore}  = $opt_linesfore;
+        $$options{Count}        = $opt_count;
+        $$options{DevSkip}      = decode_dev_skip $opt_devices;
+        $$options{DirAction}    = decode_dir_action $opt_directories;
+        $$options{DirExclude}   = compile_rx $opt_exclude;
+        $$options{DirInclude}   = compile_rx $opt_include;
+        $$options{ExtMatches}   = $opt_extmatches;
+        $$options{FileMatch}    = $opt_file_match;
+        $$options{Invert}       = $opt_invert;
+        $$options{LineNo}       = $opt_lineno;
+        $$options{MaxCount}     = $opt_maxcount;
+        $$options{MMap}         = $opt_mmap;
+        $$options{NoMessages}   = $opt_nomessages,
+        $$options{NullIn}       = $opt_nullin,
+        $$options{NullOut}      = $opt_nullout,
+        $$options{OnBinFile}    = decode_on_bin_file $opt_binfiles;
+        $$options{OnlyMatching} = $opt_onlymatching;
+        $$options{PerlBinary}   = $opt_perlbinary,
+        $$options{PerlFile}     = $opt_perlfile,
+        $$options{PerlText}     = $opt_perltext,
+        $$options{Quiet}        = $opt_quiet;
+        $$options{SkipMatchFile}= $opt_skipmatchfile;
+        $$options{Sparse}       = $opt_sparse;
+        $$options{UnixOffset}   = $opt_unixoffs;
+    }
+
+    return $options;
+}
+
+
+sub read_rx() {
+    my $rx = $opt_rx;
+    unless (defined $rx) {
+        print_help_and_die   unless @ARGV;
+        $rx = shift @ARGV;
+    }
+
+    my $optletters = join '',
+        ($opt_caseblind? 'i': ''),
+        ($opt_extrx?     'x': '');
+    $rx = "(?$optletters:$rx)" if $optletters;
+
+    $rx = "^(?:$rx)\$"      if $opt_linerx;
+    $rx = "\\b(?:$rx)\\b"   if $opt_wordrx;
+
+    return compile_rx $rx;
+}
+
+my ReGrep::Options $options = read_switches;
+$$options{RX} = read_rx;
+
+if ($$options{PerlBinary} or $$options{PerlText} or $$options{PerlFile}) {
+    ReGrep::compile \*STDOUT, $options;
+    exit 0 ;
+}
+
+my $nrmatches = 0;
+
+
+sub run_slave($$) {
+    (my ReGrep::Options $options, my $socket) = @_;
+    my $grep = $$options{FileGrepper};
+    $| = 1;
+    while (<$socket>) {
+        chomp;
+        my $nrmatches = $grep->(\*STDOUT, $_, $options);
+        print $socket pack 'L', $nrmatches;
+    }
+}
+
+
+sub fork_slaves($\@) {
+    (my ReGrep::Options $options, my $rsockets) = @_;
+
+    $semaphore = semget IPC_PRIVATE, 1, S_IRWXU | IPC_CREAT;
+    die "Can't create SysV semaphore: $!\n"   unless defined $semaphore;
+
+    my   $lockstr = pack 's!s!s!', 0, -1, 0;
+    my $unlockstr = pack 's!s!s!', 0, +1, 0;
+    semop $semaphore, $unlockstr   or die "Can't bump SysV semaphore: $!\n";
+
+    $$options{SemId}     = $semaphore;
+    $$options{SemLock}   =   $lockstr;
+    $$options{SemUnlock} = $unlockstr;
+
+    for my $slaveno (1 .. $opt_jobs) {
+        socketpair my $child, my $parent, AF_UNIX, SOCK_STREAM, PF_UNSPEC
+            or die "regrep: socketpair: $!";
+
+        my $oldsel = select $child;
+        $| = 1;
+        select $parent;
+        $| = 1;
+        select $oldsel;
+
+        my $kid = fork;
+        die "regrep: fork: $!"   unless defined $kid;
+        if ($kid) {
+            undef $semaphore;   # clean it up only in the parent thread
+            close $child;
+            run_slave $options, $parent;
+            exit;
+        }
+        else {
+            close $parent;
+            push @$rsockets, $child;
+        }
+    }
+}
+
+
+sub grep_piped_files_single_threaded() {
+    my $grep = $$options{FileGrepper};
+    while (<STDIN>) {
+        chomp;
+        s/ ^ " (.*) " $/$1/x;   # remove the unwanted quotes that sfind adds
+        $nrmatches += $grep->(\*STDOUT, $_, $options);
+    }
+}
+
+
+sub MaxPendingPerSlave()    {3}
+
+sub grep_piped_files_multi_threaded() {
+    fork_slaves $options, my @sockets;
+    my $slaveno = 0;
+    my $nrpending = 0;
+    my $buf;
+
+    # First stage: load up the slave fibres with work:
+    while (<STDIN>) {
+        s/ ^ " (.*) " $/$1/x;   # remove the unwanted quotes that sfind adds
+        my $socket = $sockets[$slaveno];
+        print $socket $_;
+        if (++$slaveno == $opt_jobs) {
+            $slaveno = 0;
+            last if ++$nrpending == MaxPendingPerSlave;
+        }
+    }
+
+    # Second stage: feed the slaves with new work, and read back the number
+    # of matches from each file, maintaining a queue of files at each slave:
+    if ($nrpending == MaxPendingPerSlave) {
+        my @nextslave = map {($_ + 1) % $opt_jobs} 0 .. $opt_jobs;
+        while (<STDIN>) {
+            s/ ^ " (.*) " $/$1/x;
+            my $socket = $sockets[$slaveno];
+            print $socket $_;
+            read $socket, $buf, 4;
+            $nrmatches += unpack 'L', $buf;
+            $slaveno = $nextslave[$slaveno];
+        }
+    }
+
+    # Third stage: read the queued match-counts; kill and reap the slaves.
+    my $next_slaveno = $slaveno;
+    for my $slaveno (0 .. $opt_jobs-1) {
+        my $socket = $sockets[$slaveno];
+        my $nrtodo = $nrpending;
+        ++$nrtodo if $nrpending < MaxPendingPerSlave and $slaveno < $next_slaveno;
+        for (1 .. $nrtodo) {
+            read $socket, $buf, 4;
+            $nrmatches += unpack 'L', $buf;
+        }
+        close $socket;
+        wait;
+    }
+}
+
+
+if ($opt_pipefilenames) {
+    local $/ = $opt_nullin? "\x00": "\n";
+    default_to $opt_filename, 1;
+    $$options{Filename} = $opt_filename;
+    $$options{Threaded} = $opt_jobs > 1;
+    ReGrep::compile \*STDOUT, $options;
+
+    $opt_jobs == 1 || $$options{Quiet}?
+        grep_piped_files_single_threaded:
+        grep_piped_files_multi_threaded;
+}
+
+if (@ARGV) {
+    $$options{Filename} = defined $opt_filename?
+        $opt_filename:
+        @ARGV > 1 || $$options{DirAction} == ReGrep::Options::DirActionRecurse;
+
+    ReGrep::compile \*STDOUT, $options;
+
+    for my $filename (@ARGV) {
+        $nrmatches += $$options{FileGrepper} (\*STDOUT, $filename, $options);
+    }
+}
+
+if (not $opt_pipefilenames and not @ARGV) {
+    ReGrep::compile \*STDOUT, $options;
+    $nrmatches = $$options{FhGrepper} (\*STDOUT, \*STDIN, $opt_label, $options);
+}
+
+exit($nrmatches == 0);
+
