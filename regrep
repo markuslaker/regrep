@@ -584,15 +584,7 @@ my $sub_file_grep = <<'SUB';
         return 0 if $filename =~ m| ([^/\\]+) $ |x  and  $1 =~ $$options{RX};
 #endif
 
-    # Resolve symlinks so that we can detect directories:
-    my $lname = $filename;
-    lstat $lname;
-    while (-l _) {
-        my $linkval = readlink $lname   or return 0;
-        $lname =~ s| [^\\/]* $ |$linkval|x;
-        0 while $lname =~ s# [\\/] [^\\/]+ [\\/] \.\. (?: [\\/] | $ ) #/#x;
-        lstat $lname;
-    }
+    stat $filename;
 
 #if $$options{DevSkip}
         return 0 if -p _ or -S _ or -b _ or -c _;
@@ -1211,4 +1203,3 @@ if (not $opt_pipefilenames and not @ARGV) {
 }
 
 exit($nrmatches == 0);
-
