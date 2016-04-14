@@ -1197,6 +1197,8 @@ if ($opt_pipefilenames) {
         grep_piped_files_multi_threaded;
 }
 
+@ARGV = glob '*'   if @ARGV == 0 and $$options{DirAction} == ReGrep::Options::DirActionRecurse;
+
 if (@ARGV) {
     $$options{Filename} = defined $opt_filename?
         $opt_filename:
