@@ -796,7 +796,7 @@ Options are:
     -f, --file <filename>
     -H, --with-filename
     -h, --no-filename
-    -I
+    -I, --ignore-binary-files
     -i, --ignore-case
     -L, --files-without-match
     -l, --files-with-match
@@ -836,7 +836,7 @@ Options are:
     -X, --extend-regexp
         Compile the Perl regex with //x
 
-    -y, --extract-captures
+    -y, --extract-matches
         Print only the parts of each line that your regex captures using
         brackets ( ).
 
@@ -962,7 +962,7 @@ sub read_switches() {
             'count|c'               => \ my $opt_count,
             'devices|D=s'           => \ my $opt_devices,
             'directories|d=s'       => \    $opt_directories,
-            'I'                     => sub {$opt_binfiles = 'without-match'},
+            'ignore-binary-files|I' => sub {$opt_binfiles = 'without-match'},
             'files-without-match|L' => sub {$opt_file_match = 0},
             'files-with-matches|l'  => sub {$opt_file_match = 1},
             'max-count|m=i'         => \ my $opt_maxcount,
