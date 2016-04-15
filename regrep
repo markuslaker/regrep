@@ -230,7 +230,7 @@ my $sub_filehandle_grep_text = <<'SUB';
             while (<$fhin>) {
 
 #if defined $$options{MaxCount}
- #define CHECK_SHADOW const«$$options{ContextAft} or $$options{RxAfter}? 'or $aftershadow': ''»
+ #define CHECK_SHADOW const«($$options{ContextAft} or $$options{RxAfter})? 'or $aftershadow': ''»
                 last unless $maxcount CHECK_SHADOW;
 #endif
 
