@@ -55,6 +55,7 @@ use fields
     'PerlText',     # Print the auto-generated Perl function that greps text files
     'Quiet',        # Print no matches.  Exit successfully as soon as a match is found.
     'RX',           # The regular expression we're searching for
+    'RxAfter',      # If RxAfter is defined, a match is considered to extend up to (but not including) the next line matching RxAfter
     'SemId',        # The ID of the semaphore that allows us to print
     'SemLock',      # The semop string that acquires the semaphore that allows us to print
     'SemUnlock',    # The semop string that releases the semaphore
@@ -69,8 +70,6 @@ use fields
     'FhGrepper',    # A reference to a hand-compiled function that determines whether a filehandle is text or binary and calls the right grepper
     'FileGrepper',  # A reference to a hand-compiled function that skips pipes, devices, etc, recurses into directories, and greps plain files
     'PlainGrepper', # A reference to a hand-compiled function that opens a file and then calls FhGrepper
-    'PrintFileNo',  # The last file number from which we printed a line
-    'PrintLineNo',  # The number of the last line we printed
     'Recurser',     # A reference to a hand-compiled function that goes into directories and greps each file in turn
     'TextGrepper';  # A reference to a hand-compiled function that greps text files with the options the user has chosen
 
@@ -160,10 +159,9 @@ my $sub_filehandle_grep_text = <<'SUB';
 #endif
 
 
-#if $$options{ContextFore} or $$options{ContextAft}
+#if $$options{ContextFore} or $$options{ContextAft} or $$options{RxAfter}
+        my $printlineno     = defined($$options{CurFileNo})? -1: undef;
         my $curfileno       = $$options{CurFileNo} || 0;
-        my $printfileno     = $$options{PrintFileNo};
-        my $printlineno     = $$options{PrintLineNo};
 #endif
 
 #if $$options{NullOut}
@@ -184,10 +182,13 @@ my $sub_filehandle_grep_text = <<'SUB';
         my @foreoffs;
  #endif
         my $hist_consume = 0;
+#endif
+
+#if $$options{ContextFore} or $$options{ContextAft} or $$options{RxAfter}
         my $hist_length = 0;
 #endif
 
-#if $$options{ContextAft}
+#if $$options{ContextAft} or $$options{RxAfter}
         my $aftershadow = 0;
 #endif
 
@@ -220,12 +221,16 @@ my $sub_filehandle_grep_text = <<'SUB';
         my $got_print_mtx;
 #endif
 
+#if $$options{RxAfter}
+        my $rx_after = $$options{RxAfter};
+#endif
+
         local $_;
         IF_SPARSE_ALLOWS
             while (<$fhin>) {
 
 #if defined $$options{MaxCount}
- #define CHECK_SHADOW const«$$options{ContextAft}? 'or $aftershadow': ''»
+ #define CHECK_SHADOW const«$$options{ContextAft} or $$options{RxAfter}? 'or $aftershadow': ''»
                 last unless $maxcount CHECK_SHADOW;
 #endif
 
@@ -250,11 +255,10 @@ my $sub_filehandle_grep_text = <<'SUB';
                     }
  #endif
 
- #if $$options{ContextFore} or $$options{ContextAft}
-  #define CHECK_HISTORY_OR const«$$options{ContextFore}? '$. - $hist_length != $printlineno+1 or': ''»
+ #if $$options{ContextFore} or $$options{ContextAft} or $$options{RxAfter}
                     # Print dashes if we're printing context and there's been a
                     # gap in our output:
-                    print $fhout "--\n" if defined $printlineno and (CHECK_HISTORY_OR $curfileno != $printfileno);
+                    print $fhout "--\n" if defined $printlineno and $printlineno+1 != $.;
  #endif
 
  #if $$options{ContextFore}
@@ -301,22 +305,28 @@ my $sub_filehandle_grep_text = <<'SUB';
                     print $fhout LINETERM unless /RX_LINETERM/;
  #endif
 
- #if $$options{ContextAft}
+ #if $$options{RxAfter}
+                    $aftershadow = -1;
+ #elsif $$options{ContextAft}
                     $aftershadow = const«$$options{ContextAft}»;
  #endif
 
- #if $$options{ContextFore} or $$options{ContextAft}
-                    $printfileno = $curfileno;
+ #if $$options{ContextFore} or $$options{ContextAft} or $$options{RxAfter}
                     $printlineno = $.;
  #endif
 #endif
                 }
 
-#if $$options{ContextFore} or $$options{ContextAft}
+#if $$options{ContextFore} or $$options{ContextAft} or $$options{RxAfter}
                 else {
 #endif
 
-#if $$options{ContextAft}
+#if defined $$options{RxAfter}
+ #define AFTER_RX_SHADOW const«$$options{ContextAft}? $$options{ContextAft}: 0»
+                    $aftershadow = AFTER_RX_SHADOW if $aftershadow < 0 and /$rx_after/;
+#endif
+
+#if $$options{ContextAft} or $$options{RxAfter}
                     # If the line doesn't match, print any 'after' context.
                     if ($aftershadow) {
                         --$aftershadow;
@@ -356,7 +366,7 @@ my $sub_filehandle_grep_text = <<'SUB';
                     }
 #endif
 
-#if $$options{ContextFore} or $$options{ContextAft}
+#if $$options{ContextFore} or $$options{ContextAft} or $$options{RxAfter}
                 }
 #endif
 
@@ -415,8 +425,6 @@ my $sub_filehandle_grep_text = <<'SUB';
         # Keep enough state to know whether we must print a separarator line
         # before the next block of output:
         $$options{CurFileNo}    = $curfileno + 1;
-        $$options{PrintFileNo}  = $printfileno;
-        $$options{PrintLineNo}  = $printlineno;
 #endif
 
 #if defined $$options{MaxCount}
@@ -823,6 +831,13 @@ Options are:
         expressions where Gnu grep(1) uses simpler regular expressions or
         bash-style filename globs
 
+    --after can take a regular expression and optional line count:
+        --after '^$'      matches up to, but not including, the next blank line.
+        --after '+1+^$'   matches up to, and including, the next blank line.
+        --after '+3+^$'   matches up to the next blank line and two lines after.
+        The second '+' can be omitted unless the next character is a digit:
+        --after '+2^$'    is equivalent to the previous example.
+
     -M, --exclude-matching
         Exclude files whose basenames match the regex -- useful for finding
         external references to classes or files.
@@ -954,7 +969,7 @@ sub read_switches() {
         my ($opt_binfiles, $opt_file_match, $opt_directories);
         Getopt::Long::GetOptions(
             # Options sent to ReGrep:
-            'after-context|A=i'     => \ my $opt_linesaft,
+            'after-context|A=s'     => \ my $opt_linesaft,
             'text|a'                => sub {$opt_binfiles = 'text'},
             'before-context|B=i'    => \ my $opt_linesfore,
             'byte-offset|b'         => \ my $opt_byteoffset,
@@ -1014,7 +1029,6 @@ sub read_switches() {
 
         $$options{Binary}       = $opt_binary;
         $$options{ByteOffset}   = $opt_byteoffset;
-        $$options{ContextAft}   = $opt_linesaft;
         $$options{ContextFore}  = $opt_linesfore;
         $$options{Count}        = $opt_count;
         $$options{DevSkip}      = decode_dev_skip $opt_devices;
@@ -1039,6 +1053,16 @@ sub read_switches() {
         $$options{SkipMatchFile}= $opt_skipmatchfile;
         $$options{Sparse}       = $opt_sparse;
         $$options{UnixOffset}   = $opt_unixoffs;
+
+        if (defined $opt_linesaft) {
+            if ($opt_linesaft =~ / ^ \d+ $ /x) {
+                $$options{ContextAft} = 0 + $opt_linesaft;
+            }
+            else {
+                $$options{ContextAft} = 0 + $1   if $opt_linesaft =~ s/ ^ \+ (\d+) \+? //x;
+                $$options{RxAfter}    = compile_rx $opt_linesaft;
+            }
+        }
     }
 
     return $options;
