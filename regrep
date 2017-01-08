@@ -261,9 +261,16 @@ my $sub_filehandle_grep_text = <<'SUB';
  #endif
 
  #if $$options{ContextFore} or $$options{ContextAft} or $$options{RxAfter}
+
+  #if $$options{ContextFore}
+   #define GAP 1 + $hist_length
+  #else
+   #define GAP 1
+  #endif
+
                     # Print dashes if we're printing context and there's been a
                     # gap in our output:
-                    print $fhout "--\n" if defined $printlineno and $printlineno+1 != $.;
+                    print $fhout "--\n" if defined $printlineno and $printlineno + GAP != $.;
  #endif
 
  #if $$options{ContextFore}
@@ -781,7 +788,7 @@ use strict;
 use IPC::SysV qw/IPC_PRIVATE S_IRWXU IPC_CREAT IPC_RMID GETVAL/;
 use Socket;
 
-our $VERSION = 0.06;
+our $VERSION = 0.07;
 
 # Won't start more --jobs than this:
 sub MaxNrJobs()     {12}
