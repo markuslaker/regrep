@@ -292,14 +292,18 @@ my $sub_filehandle_grep_text = <<'SUB';
  #endif
 
                     # Print the matching line:
- #if $$options{Filename}
+
+
+ #if not $$options{OnlyMatching}    # OnlyMatching has to make its own arrangements: it prints one intro for each match on the line
+  #if $$options{Filename}
                     print $fhout $filename, POST_FN_MATCH;
- #endif
- #if $$options{LineNo}
+  #endif
+  #if $$options{LineNo}
                     print $fhout $., ':';
- #endif
- #if $$options{ByteOffset}
+  #endif
+  #if $$options{ByteOffset}
                     print $fhout $lineoffs, ':';
+  #endif
  #endif
 
  #if $$options{Highlight}
@@ -311,7 +315,20 @@ my $sub_filehandle_grep_text = <<'SUB';
                     print $fhout $text =~ /$rx/g, "\n";
  #elsif $$options{OnlyMatching}
                     chomp (my $text = $_);
-                    print $fhout $1, "\n"   while $text =~ /\G.*?($rx)/g;
+                    while ($text =~ / \G .*? ($rx) /gx) {
+
+  #if $$options{Filename}
+                        print $fhout $filename, POST_FN_MATCH;
+  #endif
+  #if $$options{LineNo}
+                        print $fhout $., ':';
+  #endif
+  #if $$options{ByteOffset}
+                        print $fhout $lineoffs + $+[0] - length($1), ':';
+  #endif
+
+                        print $fhout $1, "\n";
+                    }
  #else
                     print $fhout $_;
                     print $fhout LINETERM unless /RX_LINETERM/;
