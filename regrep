@@ -782,7 +782,7 @@ use strict;
 use IPC::SysV qw/IPC_PRIVATE S_IRWXU IPC_CREAT IPC_RMID GETVAL/;
 use Socket;
 
-our $VERSION = 0.03;
+our $VERSION = 0.04;
 
 # Won't start more --jobs than this:
 sub MaxNrJobs()     {12}
@@ -830,7 +830,7 @@ Options are:
     -I, --ignore-binary-files
     -i, --ignore-case
     -L, --files-without-match
-    -l, --files-with-match
+    -l, --files-with-matches
     -m, --max-count <maximum-number-of-matches>
     -n, --line-number
     -o, --only-matching
@@ -1026,7 +1026,7 @@ sub read_switches() {
             'no-messages|s'         => \ my $opt_nomessages,
             'binary|U'              => \ my $opt_binary,
             'unix-byte-offsets|u'   => \ my $opt_unixoffs,
-            'invert|v'              => \ my $opt_invert,
+            'invert-match|v'        => \ my $opt_invert,
             'extract-matches|y'     => \ my $opt_extmatches,
             'null|Z'                => \ my $opt_nullout,
             'null-data|z'           => \    $opt_nullin,
