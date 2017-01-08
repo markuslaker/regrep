@@ -276,16 +276,18 @@ my $sub_filehandle_grep_text = <<'SUB';
  #if $$options{ContextFore}
                     # Print the 'before' context:
                     while ($hist_length) {
-  #if $$options{Filename}
+  #if not $$options{OnlyMatching}
+   #if $$options{Filename}
                         print $fhout $filename, POST_FN_CTX;
-  #endif
-  #if $$options{LineNo}
+   #endif
+   #if $$options{LineNo}
                         print $fhout $. - $hist_length, '-';
-  #endif
-  #if $$options{ByteOffset}
+   #endif
+   #if $$options{ByteOffset}
                         print $fhout $foreoffs[$hist_consume], '-';
-  #endif
+   #endif
                         print $fhout $forecontext[$hist_consume];
+  #endif
                         --$hist_length;
                         $hist_consume = ($hist_consume+1) % const«$$options{ContextFore}»;
                     }
@@ -366,17 +368,19 @@ my $sub_filehandle_grep_text = <<'SUB';
                     # If the line doesn't match, print any 'after' context.
                     if ($aftershadow) {
                         --$aftershadow;
- #if $$options{Filename}
+ #if not $$options{OnlyMatching}
+  #if $$options{Filename}
                         print $fhout $filename, POST_FN_CTX;
- #endif
- #if $$options{LineNo}
+  #endif
+  #if $$options{LineNo}
                         print $fhout $., '-';
- #endif
- #if $$options{ByteOffset}
+  #endif
+  #if $$options{ByteOffset}
                         print $fhout $lineoffs, '-';
- #endif
+  #endif
                         print $fhout $_;
                         print $fhout LINETERM unless /RX_LINETERM/;
+ #endif
                         $printlineno = $.;
                     }
 #endif
