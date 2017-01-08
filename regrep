@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 
-# Copyright (c) 2006-2016, Mark Stephen Laker
+# Copyright (c) 2006-2017, Mark Stephen Laker
 # Permission to use, copy, modify, and/or distribute this software for any
 # purpose with or without fee is hereby granted, provided that the above
 # copyright notice and this permission notice appear in all copies.
@@ -782,7 +782,7 @@ use strict;
 use IPC::SysV qw/IPC_PRIVATE S_IRWXU IPC_CREAT IPC_RMID GETVAL/;
 use Socket;
 
-our $VERSION = 0.02;
+our $VERSION = 0.03;
 
 # Won't start more --jobs than this:
 sub MaxNrJobs()     {12}
@@ -967,10 +967,21 @@ sub read_fixed_strings($) {
 
 # Read a set of patterns from a file.  Build a single regex that matches any
 # of the patterns.
+#
+# We can't die if the file is unreadable, because Getopt::Long would catch the
+# exception and return failure, which would cause us to display an unwanted
+# syntax summary.  So we just store the failure here for later display.
+
+my $read_rx_file_failure;
 
 sub read_rx_file($) {
     my ($filename) = @_;
-    open my $fh, '<', $filename   or die "$filename: $!\n";
+    my $fh;
+    if (not open $fh, '<', $filename) {
+        $read_rx_file_failure = "$filename: $!\n";
+        return;
+    }
+
     my @rxen = <$fh>;
     chomp @rxen;
 
@@ -1046,6 +1057,8 @@ sub read_switches() {
             '--perl-text'           => \ my $opt_perltext,
         )
             or print_help_and_die;
+
+        die $read_rx_file_failure if defined $read_rx_file_failure;
 
         undef $opt_count if defined $opt_file_match;
         default_to $opt_linesaft,  $opt_linesaround;
