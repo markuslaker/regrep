@@ -44,7 +44,6 @@ use fields
     'LineNo',       # print the line number
     'Invert',       # Invert the match
     'MaxCount',     # Maximum number of (non-)matches we'll find and report
-    'MMap',         # Do memory-mapped I/O
     'NoMessages',   # Suppress messages about nonexistent or unreadable files and directories
     'NullIn',       # Assume that input lines are separated by null bytes (\x00) instead of newlines.
     'NullOut',      # After printing a filename, output a null byte (\x00) instead of a colon or a dash.
@@ -544,7 +543,7 @@ SUB
 my $sub_plain_file_grep = <<'SUB';
     sub {
         (my $fhout, my $filename, my ReGrep::Options $options) = @_;
-        if (open my $fhin, "const«$$options{MMap}? '<:mmap': '<'»", $filename) {
+        if (open my $fhin, '<', $filename) {
             # print join(" :: ", PerlIO::get_layers $fhin), "\n";
             # exit;
             return $$options{FhGrepper} ($fhout, $fhin, $filename, $options);
@@ -782,7 +781,7 @@ use strict;
 use IPC::SysV qw/IPC_PRIVATE S_IRWXU IPC_CREAT IPC_RMID GETVAL/;
 use Socket;
 
-our $VERSION = 0.04;
+our $VERSION = 0.05;
 
 # Won't start more --jobs than this:
 sub MaxNrJobs()     {12}
@@ -849,7 +848,6 @@ Options are:
     --exclude <Perl5-regex>
     --include <Perl5-regex>
     --label
-    --mmap
         Same as in Gnu grep(1), except that regrep uses Perl 5 regular
         expressions where Gnu grep(1) uses simpler regular expressions or
         bash-style filename globs
@@ -1079,7 +1077,6 @@ sub read_switches() {
         $$options{Invert}       = $opt_invert;
         $$options{LineNo}       = $opt_lineno;
         $$options{MaxCount}     = $opt_maxcount;
-        $$options{MMap}         = $opt_mmap;
         $$options{NoMessages}   = $opt_nomessages,
         $$options{NullIn}       = $opt_nullin,
         $$options{NullOut}      = $opt_nullout,
