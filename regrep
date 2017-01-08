@@ -72,7 +72,8 @@ use fields
     'FileGrepper',  # A reference to a hand-compiled function that skips pipes, devices, etc, recurses into directories, and greps plain files
     'PlainGrepper', # A reference to a hand-compiled function that opens a file and then calls FhGrepper
     'Recurser',     # A reference to a hand-compiled function that goes into directories and greps each file in turn
-    'TextGrepper';  # A reference to a hand-compiled function that greps text files with the options the user has chosen
+    'TextGrepper',  # A reference to a hand-compiled function that greps text files with the options the user has chosen
+    'OpenFailures'; # The number of files that couldn't be opened
 
 sub new() {
     return fields::new __PACKAGE__;
@@ -552,6 +553,7 @@ my $sub_plain_file_grep = <<'SUB';
 #if not $$options{NoMessages}
             print STDERR "$filename: $!\n";
 #endif
+            ++$$options{OpenFailures};
             return 0;
         }
     }
@@ -780,7 +782,7 @@ use strict;
 use IPC::SysV qw/IPC_PRIVATE S_IRWXU IPC_CREAT IPC_RMID GETVAL/;
 use Socket;
 
-our $VERSION = 0.01;
+our $VERSION = 0.02;
 
 # Won't start more --jobs than this:
 sub MaxNrJobs()     {12}
@@ -797,6 +799,15 @@ END {
 
 # ... even if exit is violent:
 $SIG{INT} = sub {exit 2};
+
+# Gnu grep exits with status 2 on error:
+$SIG{__DIE__} = sub {
+    if (defined $^S and not $^S) {  # i.e. executing, not compiling, and not within an eval
+        (my $msg) = @_;
+        print $msg, "\n";
+        exit 2;
+    }
+};        
 
 sub print_help_and_die() {
     die <<'HELP';
@@ -1259,4 +1270,6 @@ if (not $opt_pipefilenames and not @ARGV) {
     $nrmatches = $$options{FhGrepper} (\*STDOUT, \*STDIN, $opt_label, $options);
 }
 
-exit($nrmatches == 0);
+my $rc = $$options{OpenFailures}? 2: $nrmatches == 0? 1: 0;
+exit $rc;
+
