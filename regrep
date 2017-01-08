@@ -781,7 +781,7 @@ use strict;
 use IPC::SysV qw/IPC_PRIVATE S_IRWXU IPC_CREAT IPC_RMID GETVAL/;
 use Socket;
 
-our $VERSION = 0.05;
+our $VERSION = 0.06;
 
 # Won't start more --jobs than this:
 sub MaxNrJobs()     {12}
@@ -955,11 +955,12 @@ sub compile_rx($) {
 # newlines.  Return a string representation of a single regex that matches
 # any of the strings.
 
+my @fixed_strings;      # Support multiple occurrences of --fixed-strings
+
 sub read_fixed_strings($) {
     my ($arg) = @_;
-    print "Arg: $arg\n";
-    my @rxen = map {"(?:\Q$_\E)"} split /\n/, $arg;
-    return join '|', @rxen;
+    push @fixed_strings, map {"(?:\Q$_\E)"} split /\n/, $arg;
+    return join '|', @fixed_strings;
 }
 
 
