@@ -831,7 +831,7 @@ $SIG{INT} = sub {exit 2};
 $SIG{__DIE__} = sub {
     if (defined $^S and not $^S) {  # i.e. executing, not compiling, and not within an eval
         (my $msg) = @_;
-        print STDERR $msg, "\n";
+        print $msg, "\n";
         exit 2;
     }
 };        
