@@ -820,7 +820,7 @@ my $semaphore;
 END {
     if ($semaphore) {
         semctl $semaphore, 0, IPC_RMID, 0
-            or print "semop failed: $!\n";
+            or print STDERR "semop failed: $!\n";
     }
 }
 
@@ -1311,4 +1311,3 @@ if (not $opt_pipefilenames and not @ARGV) {
 
 my $rc = $$options{OpenFailures}? 2: $nrmatches == 0? 1: 0;
 exit $rc;
-
